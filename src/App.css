@@ -471,6 +471,52 @@
   border: 1px solid #ddd6ff;
 }
 
+.timer-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #ebe7ff;
+  overflow: hidden;
+}
+
+.timer-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.25s linear, background 0.25s linear;
+}
+
+.phase-timer-card {
+  background: linear-gradient(135deg, #fff8ef 0%, #fffdf7 100%);
+  border: 2px solid #ffe4a8;
+  border-radius: 18px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 24px rgba(255, 217, 61, 0.14);
+}
+
+.phase-timer-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #9b6a00;
+  margin-bottom: 8px;
+}
+
+.phase-timer-seconds {
+  font-family: 'Fredoka One', cursive;
+  font-size: 26px;
+  line-height: 1;
+  color: #5a3e00;
+}
+
+.phase-timer-seconds.warning {
+  color: #c77b00;
+}
+
+.phase-timer-seconds.danger {
+  color: #d94b57;
+}
+
 .toast-error {
   position: fixed;
   left: 50%;

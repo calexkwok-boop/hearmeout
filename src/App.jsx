@@ -20,6 +20,8 @@ const EMOJIS = ['🦊', '🐸', '🦉', '🐙', '🐼', '🐯', '🦄', '🐻'];
 const DEFAULT_CATEGORY = 'Food Wars';
 const RANDOM_ALL_CATEGORY = 'All Categories';
 const WIN_TARGET = 20;
+const ANSWER_LIMIT_SECONDS = 20;
+const VOTE_LIMIT_SECONDS = 20;
 const PLAYER_KEY = 'hear-me-out-player';
 
 function randomCode() {
@@ -168,6 +170,50 @@ function getOrderedAnswers(room, answers) {
     .filter(Boolean);
 
   return ordered.length >= answers.length ? ordered : answers;
+}
+
+function usePhaseCountdown(startedAt, limitSeconds, locked) {
+  const [now, setNow] = useState(() => Date.now());
+  const timeoutLockedRef = useRef(false);
+  const startTime = startedAt ? new Date(startedAt).getTime() : Date.now();
+  const deadline = startTime + (limitSeconds * 1000);
+  const timeLeft = Math.max(0, Math.ceil((deadline - now) / 1000));
+  const progress = Math.max(0, Math.min(100, (timeLeft / limitSeconds) * 100));
+
+  useEffect(() => {
+    timeoutLockedRef.current = false;
+    setNow(Date.now());
+  }, [startedAt]);
+
+  useEffect(() => {
+    if (locked) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [locked]);
+
+  return { timeLeft, progress, timeoutLockedRef };
+}
+
+function PhaseTimer({ label, timeLeft, progress }) {
+  return (
+    <div className="phase-timer-card">
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+        <p className="phase-timer-label">{label}</p>
+        <p className={`phase-timer-seconds ${timeLeft <= 5 ? 'danger' : timeLeft <= 10 ? 'warning' : ''}`}>
+          {timeLeft}s
+        </p>
+      </div>
+      <div className="timer-track">
+        <div
+          className="timer-fill"
+          style={{
+            width: `${progress}%`,
+            background: timeLeft <= 5 ? '#FF6B6B' : timeLeft <= 10 ? '#FFD93D' : '#6BCB77',
+          }}
+        />
+      </div>
+    </div>
+  );
 }
 
 function SetupScreen({
@@ -404,6 +450,28 @@ function AnswerScreen({
   const everyoneAnswered = soloMode ? Boolean(myAnswer) : (players.length > 0 && answers.length === players.length);
   const charLen = (myAnswer?.answer ?? answerText).length;
   const typingFiredRef = useRef(false);
+  const timeoutSubmittedRef = useRef(false);
+  const [now, setNow] = useState(() => Date.now());
+  const roundStartedAt = room?.updated_at ? new Date(room.updated_at).getTime() : Date.now();
+  const deadline = roundStartedAt + (ANSWER_LIMIT_SECONDS * 1000);
+  const timeLeft = Math.max(0, Math.ceil((deadline - now) / 1000));
+  const progress = Math.max(0, Math.min(100, (timeLeft / ANSWER_LIMIT_SECONDS) * 100));
+
+  useEffect(() => {
+    if (myAnswer) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [myAnswer]);
+
+  useEffect(() => {
+    if (myAnswer || timeoutSubmittedRef.current || timeLeft > 0) return;
+    timeoutSubmittedRef.current = true;
+    onSubmitAnswer?.();
+  }, [myAnswer, onSubmitAnswer, timeLeft]);
+
+  useEffect(() => {
+    timeoutSubmittedRef.current = false;
+  }, [room?.round]);
 
   function handleTextChange(value) {
     setAnswerText(value);
@@ -422,7 +490,22 @@ function AnswerScreen({
     <div className="screen">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <PhaseBadge label={`Round ${room.round || 1}`} />
-        <span className="status-pill">{answers.length}/{soloMode ? 4 : players.length} answered</span>
+        <span className="status-pill">{timeLeft}s left</span>
+      </div>
+
+      <div>
+        <div className="timer-track">
+          <div
+            className="timer-fill"
+            style={{
+              width: `${progress}%`,
+              background: timeLeft <= 5 ? '#FF6B6B' : timeLeft <= 10 ? '#FFD93D' : '#6BCB77',
+            }}
+          />
+        </div>
+        <p style={{ fontSize: 12, color: '#8a839d', textAlign: 'right', marginTop: 6 }}>
+          {answers.length}/{soloMode ? 4 : players.length} answered
+        </p>
       </div>
 
       <div className="prompt-card">
@@ -501,6 +584,15 @@ function VoteScreen({
   const myVote = votes.find(vote => vote.player_id === localPlayerId);
   const everyoneVoted = soloMode ? Boolean(myVote) : (players.length > 0 && votes.length === players.length);
   const isHost = room.host_id === localPlayerId;
+  const { timeLeft, progress, timeoutLockedRef } = usePhaseCountdown(room?.updated_at, VOTE_LIMIT_SECONDS, Boolean(myVote));
+
+  useEffect(() => {
+    if (myVote || timeoutLockedRef.current || timeLeft > 0) return;
+    const fallback = orderedAnswers.find(answer => answer.player_id !== localPlayerId);
+    if (!fallback) return;
+    timeoutLockedRef.current = true;
+    onCastVote(fallback.player_id);
+  }, [myVote, timeLeft, orderedAnswers, localPlayerId, onCastVote, timeoutLockedRef]);
 
   return (
     <div className="screen">
@@ -511,7 +603,13 @@ function VoteScreen({
             Pick your favorite answer right now
           </h2>
         </div>
-        <span className="status-pill">{votes.length}/{soloMode ? 4 : players.length} voted</span>
+      </div>
+
+      <div>
+        <PhaseTimer label="Time to vote" timeLeft={timeLeft} progress={progress} />
+        <p style={{ fontSize: 12, color: '#8a839d', textAlign: 'right', marginTop: 6 }}>
+          {votes.length}/{soloMode ? 4 : players.length} voted
+        </p>
       </div>
 
       <div style={{ background: '#f7f5ff', borderRadius: 14, padding: '14px 16px' }}>
@@ -580,6 +678,15 @@ function PredictScreen({
   const myPrediction = predictions.find(vote => vote.player_id === localPlayerId);
   const everyonePredicted = soloMode ? Boolean(myPrediction) : (players.length > 0 && predictions.length === players.length);
   const isHost = room.host_id === localPlayerId;
+  const { timeLeft, progress, timeoutLockedRef } = usePhaseCountdown(room?.updated_at, VOTE_LIMIT_SECONDS, Boolean(myPrediction));
+
+  useEffect(() => {
+    if (myPrediction || timeoutLockedRef.current || timeLeft > 0) return;
+    const fallback = orderedAnswers[0];
+    if (!fallback) return;
+    timeoutLockedRef.current = true;
+    onPredict(fallback.player_id);
+  }, [myPrediction, timeLeft, orderedAnswers, onPredict, timeoutLockedRef]);
 
   return (
     <div className="screen">
@@ -590,7 +697,13 @@ function PredictScreen({
             Predict which answer will win the room later
           </h2>
         </div>
-        <span className="status-pill">{predictions.length}/{soloMode ? 4 : players.length} predicted</span>
+      </div>
+
+      <div>
+        <PhaseTimer label="Time to predict" timeLeft={timeLeft} progress={progress} />
+        <p style={{ fontSize: 12, color: '#8a839d', textAlign: 'right', marginTop: 6 }}>
+          {predictions.length}/{soloMode ? 4 : players.length} predicted
+        </p>
       </div>
 
       <div className="waiting-banner" style={{ textAlign: 'left' }}>
@@ -818,6 +931,15 @@ function RevoteScreen({
   const myRevote = revotes.find(vote => vote.player_id === localPlayerId);
   const everyoneRevoted = soloMode ? Boolean(myRevote) : (players.length > 0 && revotes.length === players.length);
   const isHost = room.host_id === localPlayerId;
+  const { timeLeft, progress, timeoutLockedRef } = usePhaseCountdown(room?.updated_at, VOTE_LIMIT_SECONDS, Boolean(myRevote));
+
+  useEffect(() => {
+    if (myRevote || timeoutLockedRef.current || timeLeft > 0) return;
+    const fallback = orderedAnswers[0];
+    if (!fallback) return;
+    timeoutLockedRef.current = true;
+    onRevote(fallback.player_id);
+  }, [myRevote, timeLeft, orderedAnswers, onRevote, timeoutLockedRef]);
 
   return (
     <div className="screen">
@@ -828,7 +950,13 @@ function RevoteScreen({
             Final vote after the debate
           </h2>
         </div>
-        <span className="status-pill">{revotes.length}/{soloMode ? 4 : players.length} voted</span>
+      </div>
+
+      <div>
+        <PhaseTimer label="Time for final vote" timeLeft={timeLeft} progress={progress} />
+        <p style={{ fontSize: 12, color: '#8a839d', textAlign: 'right', marginTop: 6 }}>
+          {revotes.length}/{soloMode ? 4 : players.length} voted
+        </p>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1609,13 +1737,9 @@ export default function App() {
     await updateRoomRoundState(currentState, PHASES.ANSWER);
   }
 
-  async function submitAnswer() {
+  async function submitAnswer(forcedText) {
     if (!supabase || !room) return;
-    const trimmed = answerText.trim();
-    if (!trimmed) {
-      setError('Write an answer before locking it in.');
-      return;
-    }
+    const trimmed = (forcedText ?? answerText).trim() || 'I ran out of time, but my gut says this is still the right answer.';
 
     const { error: answerError } = await supabase.from('answers').upsert({
       room_code: room.code,
