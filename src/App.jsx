@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './App.css';
 import { AWARDS, CATEGORY_EMOJIS, COLORS, FAKE_ANSWERS, PLAYERS, PROMPTS } from './constants.js';
 import { supabase, supabaseConfigError } from './lib/supabase.js';
@@ -13,6 +13,7 @@ const PHASES = {
   AWARDS: 'awards',
   VOTE: 'vote',
   RESULTS: 'results',
+  WAGER: 'wager',
 };
 
 const EMOJIS = ['🦊', '🐸', '🦉', '🐙', '🐼', '🐯', '🦄', '🐻'];
@@ -69,14 +70,18 @@ function promptForCategory(category) {
   return options[Math.floor(Math.random() * options.length)];
 }
 
-function createEmptyRoundState(existingScores = {}) {
+function createEmptyRoundState(existingScores = {}, existingStreaks = {}) {
   return {
     scores: existingScores,
+    streaks: existingStreaks,
     order: [],
     predictions: {},
     votes1: {},
     revotes: {},
     awardsByVoter: {},
+    wagers: {},
+    reactions: [],
+    defenses: {},
   };
 }
 
@@ -87,11 +92,15 @@ function normalizeRoundState(value) {
 
   return {
     scores: value.scores || {},
+    streaks: value.streaks || {},
     order: value.order || [],
     predictions: value.predictions || {},
     votes1: value.votes1 || {},
     revotes: value.revotes || {},
     awardsByVoter: value.awardsByVoter || {},
+    wagers: value.wagers || {},
+    reactions: value.reactions || [],
+    defenses: value.defenses || {},
   };
 }
 
@@ -279,8 +288,11 @@ function LobbyScreen({
   onCategoryChange,
   onStartRound,
   soloMode,
+  customPrompt,
+  onCustomPromptChange,
 }) {
   const isHost = room.host_id === localPlayerId;
+  const streaks = normalizeRoundState(room.answer_order).streaks || {};
 
   return (
     <div className="screen">
@@ -310,6 +322,9 @@ function LobbyScreen({
                   {player.id === localPlayerId ? ' • You' : ''}
                 </p>
               </div>
+              {(streaks[player.id] ?? 0) >= 2 && (
+                <span style={{ fontSize: 18 }} title={`${streaks[player.id]}-round win streak!`}>🔥</span>
+              )}
               <span className="score-chip">{player.score ?? 0} pts</span>
             </div>
           ))}
@@ -335,6 +350,22 @@ function LobbyScreen({
             </button>
           ))}
         </div>
+
+        {isHost && (
+          <div style={{ marginBottom: 16 }}>
+            <p className="field-label">Or write your own prompt</p>
+            <input
+              className="text-input"
+              placeholder="Ask anything..."
+              maxLength={200}
+              value={customPrompt}
+              onChange={e => onCustomPromptChange(e.target.value)}
+            />
+            {customPrompt.trim() && (
+              <p style={{ fontSize: 12, color: '#9B78FF', marginTop: 4 }}>✓ Custom prompt will be used this round</p>
+            )}
+          </div>
+        )}
 
         {isHost ? (
           <>
@@ -365,11 +396,27 @@ function AnswerScreen({
   onSubmitAnswer,
   onAdvanceToVote,
   soloMode,
+  typingStatus,
+  onTyping,
 }) {
   const myAnswer = answers.find(answer => answer.player_id === localPlayerId);
   const isHost = room.host_id === localPlayerId;
   const everyoneAnswered = soloMode ? Boolean(myAnswer) : (players.length > 0 && answers.length === players.length);
   const charLen = (myAnswer?.answer ?? answerText).length;
+  const typingFiredRef = useRef(false);
+
+  function handleTextChange(value) {
+    setAnswerText(value);
+    if (!myAnswer && !typingFiredRef.current) {
+      typingFiredRef.current = true;
+      onTyping?.();
+      setTimeout(() => { typingFiredRef.current = false; }, 4000);
+    }
+  }
+
+  const typingNames = Object.entries(typingStatus || {})
+    .filter(([pid]) => pid !== localPlayerId && !answers.find(a => a.player_id === pid))
+    .map(([, data]) => data.name);
 
   return (
     <div className="screen">
@@ -396,7 +443,7 @@ function AnswerScreen({
           placeholder="Make your case..."
           maxLength={200}
           value={myAnswer?.answer ?? answerText}
-          onChange={event => setAnswerText(event.target.value)}
+          onChange={event => handleTextChange(event.target.value)}
           disabled={Boolean(myAnswer)}
         />
         <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -405,6 +452,15 @@ function AnswerScreen({
           </div>
           <span style={{ fontSize: 11, color: charLen > 170 ? '#FF6B6B' : '#bbb', minWidth: 22, textAlign: 'right' }}>{200 - charLen}</span>
         </div>
+
+        {typingNames.length > 0 && !myAnswer && (
+          <p style={{ fontSize: 12, color: '#bbb', marginTop: 6 }}>
+            {typingNames.length === 1
+              ? `${typingNames[0]} is typing`
+              : `${typingNames.slice(0, -1).join(', ')} and ${typingNames.at(-1)} are typing`}
+            <WaitingDots />
+          </p>
+        )}
 
         {myAnswer ? (
           <div className="waiting-banner" style={{ background: '#eef9f0', color: '#2a7a40', borderColor: '#bce8c8' }}>
@@ -538,7 +594,7 @@ function PredictScreen({
       </div>
 
       <div className="waiting-banner" style={{ textAlign: 'left' }}>
-        This is not necessarily your favorite. Pick the answer you think everyone else will end up choosing after the debate.
+        Pick the answer you think everyone else will end up choosing after the debate.
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -580,9 +636,35 @@ function PredictScreen({
   );
 }
 
-function RevealScreen({ answers, players, room, votes, onContinue, isHost }) {
+function DefenseInput({ onSubmit }) {
+  const [text, setText] = useState('');
+  return (
+    <div style={{ marginTop: 10 }} onClick={e => e.stopPropagation()}>
+      <textarea
+        className="answer-textarea"
+        style={{ fontSize: 13, minHeight: 56, padding: '8px 10px' }}
+        placeholder="Defend yourself in one line..."
+        maxLength={120}
+        value={text}
+        onChange={e => setText(e.target.value)}
+      />
+      <button
+        className="btn btn-primary"
+        style={{ marginTop: 6, fontSize: 13, padding: '8px 14px' }}
+        onClick={() => { if (text.trim()) onSubmit(text); }}
+        disabled={!text.trim()}
+      >
+        Post Defense
+      </button>
+    </div>
+  );
+}
+
+function RevealScreen({ answers, players, room, votes, defenses, localPlayerId, onDefend, reactions, onReact, onContinue, isHost }) {
   const [flipped, setFlipped] = useState([]);
   const [timeLeft, setTimeLeft] = useState(60);
+  const [floatingReactions, setFloatingReactions] = useState([]);
+  const prevReactionIdsRef = useRef(new Set());
   const playerById = Object.fromEntries(players.map(player => [player.id, player]));
   const orderedAnswers = getOrderedAnswers(room, answers);
   const voteCounts = (votes || []).reduce((acc, vote) => {
@@ -596,12 +678,28 @@ function RevealScreen({ answers, players, room, votes, onContinue, isHost }) {
     return () => clearTimeout(id);
   }, [timeLeft]);
 
+  useEffect(() => {
+    const newOnes = (reactions || []).filter(r => !prevReactionIdsRef.current.has(r.id));
+    newOnes.forEach(r => prevReactionIdsRef.current.add(r.id));
+    if (newOnes.length === 0) return undefined;
+    const floaters = newOnes.map(r => ({ key: r.id, emoji: r.emoji, left: `${15 + Math.random() * 70}%` }));
+    setFloatingReactions(prev => [...prev, ...floaters]);
+    const tid = setTimeout(() => {
+      setFloatingReactions(prev => prev.filter(f => !floaters.find(fl => fl.key === f.key)));
+    }, 2200);
+    return () => clearTimeout(tid);
+  }, [reactions]);
+
   function toggle(playerId) {
     setFlipped(prev => (prev.includes(playerId) ? prev.filter(item => item !== playerId) : [...prev, playerId]));
   }
 
   return (
-    <div className="screen">
+    <div className="screen" style={{ position: 'relative' }}>
+      {floatingReactions.map(r => (
+        <div key={r.key} className="reaction-float" style={{ left: r.left }}>{r.emoji}</div>
+      ))}
+
       <div>
         <PhaseBadge label="The Big Reveal" bg="#6BCB77" color="#1a4020" />
         <h2 className="display-font" style={{ fontSize: 24, marginTop: 10, color: '#1a1a1a' }}>
@@ -630,6 +728,8 @@ function RevealScreen({ answers, players, room, votes, onContinue, isHost }) {
         {orderedAnswers.map((answer, index) => {
           const player = playerById[answer.player_id];
           const isFlipped = flipped.includes(answer.player_id);
+          const isMyCard = answer.player_id === localPlayerId;
+          const defense = defenses?.[answer.player_id];
 
           return (
             <div key={answer.player_id} className="flip-card" onClick={() => toggle(answer.player_id)}>
@@ -653,6 +753,14 @@ function RevealScreen({ answers, players, room, votes, onContinue, isHost }) {
                           {voteCounts[answer.player_id]} first vote{voteCounts[answer.player_id] !== 1 ? 's' : ''}
                         </p>
                       )}
+                      {defense && (
+                        <p style={{ fontSize: 13, fontStyle: 'italic', color: '#555', marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee' }}>
+                          💬 &ldquo;{defense}&rdquo;
+                        </p>
+                      )}
+                      {isMyCard && isFlipped && !defense && (
+                        <DefenseInput onSubmit={onDefend} />
+                      )}
                     </div>
                   </div>
                 </div>
@@ -660,6 +768,20 @@ function RevealScreen({ answers, players, room, votes, onContinue, isHost }) {
             </div>
           );
         })}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+        {['🔥', '💀', '👀', '😂'].map(emoji => (
+          <button
+            key={emoji}
+            style={{ fontSize: 24, background: 'none', border: '1px solid #e8e4ff', borderRadius: 12, padding: '8px 12px', cursor: 'pointer', transition: 'transform 0.1s' }}
+            onClick={() => onReact(emoji)}
+            onMouseDown={e => { e.currentTarget.style.transform = 'scale(0.85)'; }}
+            onMouseUp={e => { e.currentTarget.style.transform = ''; }}
+          >
+            {emoji}
+          </button>
+        ))}
       </div>
 
       <button
@@ -816,7 +938,108 @@ function AwardsScreen({ players, localPlayerId, awardSelections, onPickAward, on
   );
 }
 
-function ResultsScreen({ room, players, answers, revotes, vote1, predictions, localPlayerId, onNextRound, isHost }) {
+function WagerScreen({ room, players, localPlayerId, wagers, onWager, onAdvanceToAnswer, soloMode }) {
+  const roundState = normalizeRoundState(room?.answer_order);
+  const myWager = wagers[localPlayerId];
+  const hasWagered = myWager !== undefined;
+  const everyoneWagered = soloMode
+    ? hasWagered
+    : (players.length > 0 && players.every(p => wagers[p.id] !== undefined));
+  const isHost = room.host_id === localPlayerId;
+  const myScore = roundState.scores[localPlayerId] ?? 0;
+  const maxWager = Math.min(myScore, 3);
+
+  return (
+    <div className="screen">
+      <div>
+        <PhaseBadge label={`Round ${room.round}`} />
+        <h2 className="display-font" style={{ fontSize: 28, color: '#1a1a1a', marginTop: 10 }}>
+          Place your wager
+        </h2>
+        <p style={{ fontSize: 14, color: '#888', marginTop: 4 }}>
+          Bet on yourself. Win the round, collect the bonus. Lose, and it&apos;s gone.
+        </p>
+      </div>
+
+      <div className="prompt-card">
+        <PhaseBadge
+          label={room.category === RANDOM_ALL_CATEGORY ? 'Random Category' : (room.category || DEFAULT_CATEGORY)}
+          bg="#ffffff"
+          color="#7C5CFC"
+        />
+        <p className="display-font" style={{ fontSize: 22, lineHeight: 1.35, marginTop: 14 }}>{room.prompt}</p>
+      </div>
+
+      {!hasWagered ? (
+        <div className="panel-card">
+          <p className="field-label">How many points will you risk on yourself?</p>
+          <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
+            Your score: <strong>{myScore} pts</strong>
+            {maxWager > 0 ? ` · Max wager: ${maxWager} pts` : ' · Earn points first to unlock wagering'}
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            {[0, 1, 2, 3].map(amount => (
+              <button
+                key={amount}
+                className={`btn ${amount === 0 ? 'btn-secondary' : 'btn-primary'}`}
+                style={{ flex: 1, fontSize: 17, opacity: amount > maxWager ? 0.3 : 1 }}
+                onClick={() => onWager(amount)}
+                disabled={amount > maxWager}
+              >
+                {amount === 0 ? 'Pass' : `${amount}pt${amount !== 1 ? 's' : ''}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div
+          className="waiting-banner"
+          style={myWager > 0
+            ? { background: '#fffbeb', color: '#7a5000', borderColor: '#ffe08a' }
+            : { background: '#eef9f0', color: '#2a7a40', borderColor: '#bce8c8' }}
+        >
+          {myWager > 0 ? `💰 ${myWager} pt${myWager !== 1 ? 's' : ''} on the line!` : '✓ Sitting this one out.'}
+          {' '}Waiting for everyone.<WaitingDots />
+        </div>
+      )}
+
+      <div className="panel-card">
+        <div className="section-header">
+          <span>Wagers</span>
+          <span>{Object.keys(wagers).length}/{players.length} placed</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {players.map((p, index) => {
+            const playerWager = wagers[p.id];
+            return (
+              <div key={p.id} className="player-row">
+                <div className="avatar" style={avatarStyle(index)}>{p.emoji}</div>
+                <p style={{ flex: 1, fontWeight: 600, color: '#2a2340' }}>{p.name}</p>
+                <span style={{
+                  fontSize: 13,
+                  color: playerWager === undefined ? '#ccc' : playerWager === 0 ? '#aaa' : '#7C5CFC',
+                  fontWeight: playerWager > 0 ? 700 : 400,
+                }}>
+                  {playerWager === undefined ? '…' : playerWager === 0 ? 'Passing' : `${playerWager} pt${playerWager !== 1 ? 's' : ''}`}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {isHost && everyoneWagered ? (
+        <button className="btn btn-primary" onClick={onAdvanceToAnswer}>
+          Wagers Set • Start Answering
+        </button>
+      ) : everyoneWagered ? (
+        <div className="waiting-banner">Waiting for the host to start answering.<WaitingDots /></div>
+      ) : null}
+    </div>
+  );
+}
+
+function ResultsScreen({ room, players, answers, revotes, vote1, predictions, localPlayerId, wagers, onNextRound, isHost }) {
   const [confetti, setConfetti] = useState([]);
   const answerByPlayerId = Object.fromEntries(answers.map(answer => [answer.player_id, answer]));
   const rankedPlayers = [...players].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
@@ -832,6 +1055,7 @@ function ResultsScreen({ room, players, answers, revotes, vote1, predictions, lo
   }, {});
   const maxRevotes = Math.max(0, ...Object.values(revoteCounts));
   const revoteWinnerIds = maxRevotes > 0 ? Object.keys(revoteCounts).filter(id => revoteCounts[id] === maxRevotes) : [];
+  const wagerMap = wagers || {};
   const predictionMap = Object.fromEntries((predictions || []).map(p => [p.player_id, p.target_player_id]));
   const correctPredictors = Object.keys(predictionMap).filter(pid => revoteWinnerIds.includes(predictionMap[pid]));
   const iPredictedRight = localPlayerId && revoteWinnerIds.includes(predictionMap[localPlayerId]);
@@ -904,6 +1128,9 @@ function ResultsScreen({ room, players, answers, revotes, vote1, predictions, lo
           const v1 = vote1Counts[player.id] ?? 0;
           const rv = revoteCounts[player.id] ?? 0;
           const mindSwitchCount = mindChangerIds.filter(pid => revoteMap[pid] === player.id).length;
+          const playerWager = wagerMap[player.id];
+          const wonWager = playerWager > 0 && revoteWinnerIds.includes(player.id);
+          const lostWager = playerWager > 0 && !revoteWinnerIds.includes(player.id);
           return (
             <div key={player.id} className="panel-card result-card" style={{ animationDelay: `${index * 0.1}s` }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
@@ -917,7 +1144,11 @@ function ResultsScreen({ room, players, answers, revotes, vote1, predictions, lo
                         {mindSwitchCount > 0 && <span style={{ color: '#7C5CFC', marginLeft: 6 }}>+{mindSwitchCount} switched</span>}
                       </p>
                     </div>
-                    <span className="score-chip">{player.score ?? 0} pts total</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                      <span className="score-chip">{player.score ?? 0} pts total</span>
+                      {wonWager && <span style={{ fontSize: 11, background: '#eef9f0', color: '#2a7a40', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>💰 +{playerWager} wager</span>}
+                      {lostWager && <span style={{ fontSize: 11, background: '#fff0f0', color: '#c04a74', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>💸 -{playerWager} wager</span>}
+                    </div>
                   </div>
                   <p style={{ marginTop: 10, color: '#2a2340', lineHeight: 1.5 }}>
                     {answer?.answer || 'No answer submitted this round.'}
@@ -982,6 +1213,9 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState('');
   const [connectionLabel, setConnectionLabel] = useState('Offline');
+  const [typingStatus, setTypingStatus] = useState({});
+  const [customPrompt, setCustomPrompt] = useState('');
+  const channelRef = useRef(null);
 
   async function loadRoomSnapshot(targetCode) {
     if (!supabase || !targetCode) return;
@@ -1084,6 +1318,10 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'votes', filter: `room_code=eq.${roomCode}` }, () => {
         loadRoomSnapshot(roomCode);
       })
+      .on('broadcast', { event: 'typing' }, ({ payload }) => {
+        setTypingStatus(prev => ({ ...prev, [payload.playerId]: { name: payload.name, ts: Date.now() } }));
+        setTimeout(() => setTypingStatus(prev => { const next = { ...prev }; delete next[payload.playerId]; return next; }), 5000);
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           setConnectionLabel('Live');
@@ -1093,8 +1331,10 @@ export default function App() {
           setConnectionLabel('Connecting...');
         }
       });
+    channelRef.current = channel;
 
     return () => {
+      channelRef.current = null;
       supabase.removeChannel(channel);
     };
   }, [roomCode]);
@@ -1104,6 +1344,28 @@ export default function App() {
       const i = EMOJIS.indexOf(prev.emoji);
       return { ...prev, emoji: EMOJIS[(i + 1) % EMOJIS.length] };
     });
+  }
+
+  function broadcastTyping() {
+    channelRef.current?.send({
+      type: 'broadcast',
+      event: 'typing',
+      payload: { playerId: player.id, name: player.name },
+    });
+  }
+
+  async function submitReaction(emoji) {
+    if (!supabase || !room) return;
+    const currentState = normalizeRoundState(room.answer_order);
+    const nextReactions = [...currentState.reactions, { id: crypto.randomUUID(), emoji, playerId: player.id }];
+    await updateRoomRoundState({ ...currentState, reactions: nextReactions }, PHASES.REVEAL);
+  }
+
+  async function submitDefense(text) {
+    if (!supabase || !room) return;
+    const currentState = normalizeRoundState(room.answer_order);
+    const nextDefenses = { ...currentState.defenses, [player.id]: text.trim() };
+    await updateRoomRoundState({ ...currentState, defenses: nextDefenses }, PHASES.REVEAL);
   }
 
   function ensureName() {
@@ -1298,7 +1560,7 @@ export default function App() {
     if (!supabase || !room || room.host_id !== player.id) return;
     const nextRound = (room.round || 0) + 1;
     const category = categoryDraft || DEFAULT_CATEGORY;
-    const prompt = promptForCategory(category);
+    const prompt = customPrompt.trim() || promptForCategory(category);
     const roundState = normalizeRoundState(room.answer_order);
 
     setError('');
@@ -1310,11 +1572,11 @@ export default function App() {
     const { error: roomError } = await supabase
       .from('rooms')
       .update({
-        current_phase: PHASES.ANSWER,
+        current_phase: PHASES.WAGER,
         round: nextRound,
         category,
         prompt,
-        answer_order: createEmptyRoundState(roundState.scores),
+        answer_order: createEmptyRoundState(roundState.scores, roundState.streaks),
       })
       .eq('code', room.code);
 
@@ -1323,7 +1585,28 @@ export default function App() {
       return;
     }
 
+    setCustomPrompt('');
     await loadRoomSnapshot(room.code);
+  }
+
+  async function submitWager(amount) {
+    if (!supabase || !room) return;
+    const currentState = normalizeRoundState(room.answer_order);
+    const nextWagers = { ...currentState.wagers, [player.id]: amount };
+
+    if (players.length === 1) {
+      activeSoloPlayers.forEach(bot => {
+        nextWagers[bot.id] = 1 + Math.floor(Math.random() * 2);
+      });
+    }
+
+    await updateRoomRoundState({ ...currentState, wagers: nextWagers }, PHASES.WAGER);
+  }
+
+  async function advanceToAnswer() {
+    if (!supabase || !room || room.host_id !== player.id) return;
+    const currentState = normalizeRoundState(room.answer_order);
+    await updateRoomRoundState(currentState, PHASES.ANSWER);
   }
 
   async function submitAnswer() {
@@ -1521,7 +1804,25 @@ export default function App() {
       });
     });
 
-    await updateRoomRoundState({ ...currentState, scores: nextScores }, PHASES.RESULTS);
+    Object.entries(currentState.wagers || {}).forEach(([wagerId, amount]) => {
+      if (amount > 0) {
+        if (winningAnswerIds.includes(wagerId)) {
+          nextScores[wagerId] = (nextScores[wagerId] || 0) + amount;
+        } else {
+          nextScores[wagerId] = (nextScores[wagerId] || 0) - amount;
+        }
+      }
+    });
+
+    const nextStreaks = {};
+    winningAnswerIds.forEach(winnerId => {
+      nextStreaks[winnerId] = (currentState.streaks[winnerId] || 0) + 1;
+      if (nextStreaks[winnerId] >= 2) {
+        nextScores[winnerId] = (nextScores[winnerId] || 0) + 1;
+      }
+    });
+
+    await updateRoomRoundState({ ...currentState, scores: nextScores, streaks: nextStreaks }, PHASES.RESULTS);
   }
 
   async function backToLobby() {
@@ -1536,7 +1837,7 @@ export default function App() {
       .update({
         current_phase: PHASES.LOBBY,
         prompt: null,
-        answer_order: createEmptyRoundState(currentState.scores),
+        answer_order: createEmptyRoundState(currentState.scores, currentState.streaks),
       })
       .eq('code', room.code);
 
@@ -1628,6 +1929,20 @@ export default function App() {
           onCategoryChange={updateLobbyCategory}
           onStartRound={startRound}
           soloMode={soloMode}
+          customPrompt={customPrompt}
+          onCustomPromptChange={setCustomPrompt}
+        />
+      )}
+
+      {room.current_phase === PHASES.WAGER && (
+        <WagerScreen
+          room={room}
+          players={displayPlayers}
+          localPlayerId={player.id}
+          wagers={roundState.wagers}
+          onWager={submitWager}
+          onAdvanceToAnswer={advanceToAnswer}
+          soloMode={soloMode}
         />
       )}
 
@@ -1642,6 +1957,8 @@ export default function App() {
           onSubmitAnswer={submitAnswer}
           onAdvanceToVote={advanceToVote}
           soloMode={soloMode}
+          typingStatus={typingStatus}
+          onTyping={broadcastTyping}
         />
       )}
 
@@ -1677,6 +1994,11 @@ export default function App() {
           players={displayPlayers}
           answers={displayAnswers}
           votes={displayVotes}
+          defenses={roundState.defenses}
+          localPlayerId={player.id}
+          onDefend={submitDefense}
+          reactions={roundState.reactions}
+          onReact={submitReaction}
           onContinue={advanceToRevote}
           isHost={room.host_id === player.id}
         />
@@ -1719,6 +2041,7 @@ export default function App() {
           vote1={displayVotes}
           predictions={displayPredictions}
           localPlayerId={player.id}
+          wagers={roundState.wagers}
           onNextRound={backToLobby}
           isHost={room.host_id === player.id}
         />

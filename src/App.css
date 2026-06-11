@@ -166,11 +166,12 @@
 
 /* ─── Flip card ─────────────────────────────────────────────────────────────── */
 .flip-card    { perspective: 600px; cursor: pointer; }
-.flip-inner   { transition: transform 0.55s; transform-style: preserve-3d; position: relative; }
+.flip-inner   { transition: transform 0.55s; transform-style: preserve-3d; position: relative; display: grid; }
 .flip-inner.flipped { transform: rotateY(180deg); }
 
 .flip-front,
 .flip-back {
+  grid-area: 1 / 1;
   border-radius: 16px;
   padding: 20px 22px;
   backface-visibility: hidden;
@@ -188,8 +189,6 @@
   background: #fff;
   border: 2px solid #e8e8e8;
   transform: rotateY(180deg);
-  position: absolute;
-  top: 0; left: 0; right: 0;
 }
 
 /* ─── Score bar ─────────────────────────────────────────────────────────────── */
@@ -301,6 +300,21 @@
   .confirm-modal-actions {
     grid-template-columns: 1fr;
   }
+}
+
+/* ─── Reaction floaters ─────────────────────────────────────────────────────── */
+@keyframes float-up {
+  0%   { transform: translateY(0);      opacity: 1; }
+  100% { transform: translateY(-160px); opacity: 0; }
+}
+.reaction-float {
+  position: absolute;
+  bottom: 80px;
+  font-size: 30px;
+  animation: float-up 2s ease-out forwards;
+  pointer-events: none;
+  z-index: 10;
+  user-select: none;
 }
 
 /* ─── Confetti ──────────────────────────────────────────────────────────────── */
