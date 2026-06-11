@@ -1,3 +1,13 @@
+// ─── Category emojis ─────────────────────────────────────────────────────────
+export const CATEGORY_EMOJIS = {
+  'Food Wars':        '🍕',
+  'Bucket List':      '🪣',
+  'Tradeoffs':        '⚖️',
+  'Icebreakers':      '🧊',
+  'Hot Takes':        '🔥',
+  'Would You Rather': '🤔',
+};
+
 // ─── Player colors ───────────────────────────────────────────────────────────
 export const COLORS = [
   { bg: '#7C5CFC', fg: '#fff',     name: 'purple' },
